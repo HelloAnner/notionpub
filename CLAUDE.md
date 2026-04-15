@@ -1,5 +1,7 @@
 # NotionPub CLI
 
+GitHub: https://github.com/HelloAnner/notionpub
+
 ## Notion 文档
 
 - **PRD 文档** — 产品需求文档，定义用户画像、功能优先级、核心假设与验证计划、产品路线图

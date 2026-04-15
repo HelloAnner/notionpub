@@ -1,153 +1,133 @@
 /**
  * Feishu MCP JSON-RPC client.
  *
- * Communicates with the Feishu MCP server over HTTP,
- * handling both plain JSON and SSE (event-stream) response formats.
+ * Directly calls the Feishu MCP HTTP endpoint using JSON-RPC 2.0,
+ * matching the protocol reverse-engineered from the publish-dev-doc script.
+ * Handles both standard JSON and SSE (event-stream) responses.
  */
 
-interface JsonRpcRequest {
-  jsonrpc: "2.0";
-  id: number;
-  method: string;
-  params: Record<string, unknown>;
-}
-
-interface JsonRpcResponse {
-  jsonrpc: "2.0";
-  id: number;
-  result?: unknown;
-  error?: { code: number; message: string; data?: unknown };
-}
-
-interface McpToolResult {
-  content: Array<{ type: string; text: string }>;
-  isError?: boolean;
+export class FeishuMcpError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FeishuMcpError";
+  }
 }
 
 export class FeishuMcpClient {
-  private baseUrl: string;
-  private requestId = 0;
+  private mcpUrl: string;
+  private reqId = 0;
+  private timeoutMs: number;
 
-  constructor(baseUrl: string) {
-    this.baseUrl = baseUrl.replace(/\/$/, "");
+  constructor(mcpUrl: string, timeoutMs = 120_000) {
+    this.mcpUrl = mcpUrl;
+    this.timeoutMs = timeoutMs;
   }
 
-  /** Perform the MCP initialize handshake */
+  /** MCP handshake — must be called once before any tool calls */
   async init(): Promise<void> {
     await this.call("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
       clientInfo: { name: "notionpub", version: "0.1.0" },
     });
-    // Send initialized notification (no response expected)
-    await this.notify("notifications/initialized", {});
+    await this.call("notifications/initialized", undefined, true);
   }
 
-  /** Invoke an MCP tool by name */
-  async tool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
+  /** Invoke an MCP tool, parse result.content[0].text as JSON */
+  async tool<T = Record<string, unknown>>(
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<T> {
     const result = await this.call("tools/call", { name, arguments: args });
-    return result as McpToolResult;
+    if (!result || typeof result !== "object") {
+      throw new FeishuMcpError(`Empty response from tool "${name}"`);
+    }
+
+    const mcpResult = result as { content?: Array<{ type: string; text: string }> };
+    const content = mcpResult.content ?? [];
+    if (content.length > 0 && content[0].type === "text") {
+      try {
+        return JSON.parse(content[0].text) as T;
+      } catch {
+        return { raw: content[0].text } as T;
+      }
+    }
+    return result as T;
   }
 
-  /** List available tools on the server */
-  async listTools(): Promise<unknown> {
-    return this.call("tools/list", {});
-  }
+  /** Low-level JSON-RPC call */
+  private async call(
+    method: string,
+    params?: Record<string, unknown>,
+    isNotification = false,
+  ): Promise<unknown> {
+    const payload: Record<string, unknown> = { jsonrpc: "2.0", method };
+    if (!isNotification) {
+      payload.id = ++this.reqId;
+    }
+    if (params) {
+      payload.params = params;
+    }
 
-  /** Send a JSON-RPC request and return the result */
-  private async call(method: string, params: Record<string, unknown>): Promise<unknown> {
-    const id = ++this.requestId;
-    const request: JsonRpcRequest = {
-      jsonrpc: "2.0",
-      id,
-      method,
-      params,
-    };
-
-    const response = await fetch(this.baseUrl, {
+    const response = await fetch(this.mcpUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json, text/event-stream",
       },
-      body: JSON.stringify(request),
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
 
     if (!response.ok) {
-      throw new Error(`MCP HTTP error ${response.status}: ${await response.text()}`);
+      const body = await response.text().catch(() => "");
+      throw new FeishuMcpError(`HTTP ${response.status}: ${body.slice(0, 300)}`);
     }
 
-    const contentType = response.headers.get("content-type") ?? "";
+    const ct = response.headers.get("content-type") ?? "";
+    const body = await response.text();
 
-    if (contentType.includes("text/event-stream")) {
-      return this.parseEventStream(response, id);
+    if (!body.trim()) return null;
+
+    // SSE response — extract last data line
+    if (ct.includes("event-stream")) {
+      return this.parseEventStream(body);
     }
 
-    const json = (await response.json()) as JsonRpcResponse;
-    if (json.error) {
-      throw new Error(`MCP error ${json.error.code}: ${json.error.message}`);
+    // Standard JSON response
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    if (parsed.error) {
+      const err = parsed.error as { message?: string };
+      throw new FeishuMcpError(err.message ?? JSON.stringify(parsed.error));
     }
-    return json.result;
-  }
-
-  /** Send a JSON-RPC notification (no id, no response) */
-  private async notify(method: string, params: Record<string, unknown>): Promise<void> {
-    await fetch(this.baseUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", method, params }),
-    });
+    return parsed.result;
   }
 
   /**
-   * Parse a Server-Sent Events stream to extract the JSON-RPC response.
-   * The MCP server may send progress events before the final result.
+   * Parse SSE body — the MCP server may return event-stream format.
+   * We read the full body (not streaming) and extract the last data line,
+   * matching the approach proven in the publish-dev-doc script.
    */
-  private async parseEventStream(response: Response, expectedId: number): Promise<unknown> {
-    const body = response.body;
-    if (!body) throw new Error("Empty SSE response body");
+  private parseEventStream(body: string): unknown {
+    let lastResult: unknown = null;
 
-    const reader = body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        // Process complete SSE events (separated by double newlines)
-        const events = buffer.split("\n\n");
-        buffer = events.pop() ?? "";
-
-        for (const event of events) {
-          const dataLine = event
-            .split("\n")
-            .find((line) => line.startsWith("data: "));
-
-          if (!dataLine) continue;
-
-          const jsonStr = dataLine.slice(6); // Remove "data: " prefix
-          try {
-            const json = JSON.parse(jsonStr) as JsonRpcResponse;
-            if (json.id === expectedId) {
-              if (json.error) {
-                throw new Error(`MCP error ${json.error.code}: ${json.error.message}`);
-              }
-              return json.result;
-            }
-          } catch (e) {
-            if (e instanceof SyntaxError) continue; // Not JSON, skip
-            throw e;
-          }
+    for (const line of body.split("\n")) {
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data) continue;
+      try {
+        const parsed = JSON.parse(data) as Record<string, unknown>;
+        if (parsed.error) {
+          const err = parsed.error as { message?: string };
+          throw new FeishuMcpError(err.message ?? JSON.stringify(parsed.error));
         }
+        lastResult = parsed.result ?? lastResult;
+      } catch (e) {
+        if (e instanceof FeishuMcpError) throw e;
+        // Not valid JSON — skip
       }
-    } finally {
-      reader.releaseLock();
     }
 
-    throw new Error("SSE stream ended without a matching JSON-RPC response");
+    return lastResult;
   }
 }

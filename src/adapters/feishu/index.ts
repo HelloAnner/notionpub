@@ -1,10 +1,10 @@
 import type { Adapter, PlatformContent, PublishOptions, PublishResult } from "../types.js";
 import type { ASTNode, ArticleMeta } from "../../core/ast.js";
 import { transform } from "./transformer.js";
-import { FeishuPublisher } from "./publisher.js";
+import { FeishuPublisher, type FeishuPublishConfig } from "./publisher.js";
 
-export function createFeishuAdapter(mcpUrl: string): Adapter {
-  const publisher = new FeishuPublisher(mcpUrl);
+export function createFeishuAdapter(mcpUrl: string, config: FeishuPublishConfig = {}): Adapter {
+  const publisher = new FeishuPublisher(mcpUrl, config);
 
   return {
     name: "feishu",
@@ -13,14 +13,15 @@ export function createFeishuAdapter(mcpUrl: string): Adapter {
       return transform(nodes, meta);
     },
 
-    async uploadImage(_localPath: string): Promise<string> {
-      // Feishu MCP handles image URLs within the markdown content.
-      // External image URLs are rendered directly by the Feishu doc.
-      return _localPath;
+    async uploadImage(localPath: string): Promise<string> {
+      // Feishu MCP downloads images from URLs in the markdown.
+      // Images should already have been re-uploaded to litterbox
+      // by the ImageProcessor before reaching this point.
+      return localPath;
     },
 
-    async publish(content: PlatformContent, options: PublishOptions): Promise<PublishResult> {
-      return publisher.publish(content, options);
+    async publish(content: PlatformContent, _options: PublishOptions): Promise<PublishResult> {
+      return publisher.publish(content);
     },
   };
 }

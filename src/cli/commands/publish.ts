@@ -16,14 +16,21 @@ export const publishCommand = new Command("publish")
   .option("--no-ai", "Skip AI format enhancement")
   .option("--dry-run", "Preview only, do not publish")
   .option("--verbose", "Verbose output")
+  .option("--feishu-node <token>", "Override feishu wiki node token")
   .action(async (url: string, opts) => {
     const config = await loadConfig();
     const credentials = new CredentialStore();
 
     const draft = opts.publish ? false : opts.draft;
-    const platforms = opts.to ? opts.to.split(",").map((s: string) => s.trim()) : Object.keys(config.adapters);
+    const platforms = opts.to
+      ? opts.to.split(",").map((s: string) => s.trim())
+      : Object.keys(config.adapters);
 
-    // Register adapters based on requested platforms
+    if (platforms.length === 0) {
+      console.error("No target platforms configured. Run: notionpub config init");
+      process.exit(1);
+    }
+
     for (const platform of platforms) {
       if (platform === "devto") {
         const apiKey = await credentials.get("devto-api-key");
@@ -40,7 +47,15 @@ export const publishCommand = new Command("publish")
           console.error("Feishu MCP URL not configured. Run: notionpub config set-token --feishu");
           process.exit(1);
         }
-        registerAdapter(createFeishuAdapter(mcpUrl));
+        const fc = config.adapters.feishu;
+        registerAdapter(
+          createFeishuAdapter(mcpUrl, {
+            wikiNode: opts.feishuNode ?? fc?.wikiNode,
+            wikiSpace: fc?.wikiSpace,
+            folderToken: fc?.folderToken,
+            chunkSize: fc?.chunkSize,
+          }),
+        );
       }
     }
 
@@ -50,22 +65,29 @@ export const publishCommand = new Command("publish")
       process.exit(1);
     }
 
-    const aiApiKey = config.ai.enabled && opts.ai !== false
-      ? await credentials.get("anthropic-api-key")
-      : undefined;
+    const aiApiKey =
+      config.ai.enabled && opts.ai !== false
+        ? await credentials.get("anthropic-api-key")
+        : undefined;
 
-    const results = await runPublishPipeline(url, {
-      notionToken,
-      platforms,
-      aiApiKey: aiApiKey ?? undefined,
-      noAi: opts.ai === false,
-      dryRun: opts.dryRun ?? false,
-      draft,
-      verbose: opts.verbose ?? false,
-    });
+    try {
+      const results = await runPublishPipeline(url, {
+        notionToken,
+        platforms,
+        aiApiKey: aiApiKey ?? undefined,
+        noAi: opts.ai === false,
+        dryRun: opts.dryRun ?? false,
+        draft,
+        verbose: opts.verbose ?? false,
+      });
 
-    console.log(formatResults(results));
+      console.log(formatResults(results));
 
-    const hasFailure = results.some((r) => !r.success);
-    process.exit(hasFailure ? 1 : 0);
+      const hasFailure = results.some((r) => !r.success);
+      process.exit(hasFailure ? 1 : 0);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`\n✗ ${msg}`);
+      process.exit(1);
+    }
   });
