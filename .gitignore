@@ -1,0 +1,7 @@
+node_modules
+dist
+.notionpub
+*.env
+.env.*
+.DS_Store
+*.tsbuildinfo

@@ -1,0 +1,22 @@
+{
+  // Notion integration token (or use keychain via `notionpub config set-token --notion`)
+  // "notionToken": "ntn_xxx",
+
+  // Dev.to API key (or use keychain via `notionpub config set-token --devto`)
+  // "devtoApiKey": "xxx",
+
+  // Feishu MCP server URL (or use keychain via `notionpub config set-token --feishu`)
+  // "feishuMcpUrl": "http://localhost:3000/mcp",
+
+  // Anthropic API key for AI enhancement
+  // "anthropicApiKey": "sk-ant-xxx",
+
+  // Default publish targets
+  // "defaultTargets": ["devto", "feishu"],
+
+  // Enable AI enhancement by default
+  // "aiEnhance": true,
+
+  // Publish as draft by default
+  // "draft": true
+}
